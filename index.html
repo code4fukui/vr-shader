@@ -1,0 +1,204 @@
+<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><link rel="icon" href="data:">
+<title>VR-shader for Quest/VisionPro with three.js</title>
+<!DOCTYPE html>
+<body style="margin:0; background-color: #333;">
+<div id="container"></div>
+
+<div id="info" style="position: absolute; top: .5em; left: .5em; background-color: rgba(255, 255, 255, .8); padding: .3em;">
+VR-shader for Quest/VisionPro with <a href="https://threejs.org" style="color: black !important;">three.js</a><br>
+Shader: <a href=https://twigl.app/?ol=true&ss=-NzCQrOoJvqhlwmyMJCk>on twigl.app</a> by <a href=https://x.com/YoheiNishitsuji/status/1796435007873151189>@YoheiNishitsuji</a><br>
+<a href=https://github.com/code4fukui/vr-shader>src on GitHub</a><br>
+</div>
+
+<style>
+body {
+  font-family: sans-serif;
+}
+a {
+  color: black !important;
+}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://code4fukui.github.io/three.js/build/three.module.js",
+    "three/addons/": "https://code4fukui.github.io/three.js/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { XRButton } from 'https://code4fukui.github.io/fisheyes-viewer/XRButton.js';
+import { isVisionPro } from "https://code4fukui.github.io/fisheyes-viewer/isVisionPro.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); // alpha for AR
+//renderer.setClearColor(new THREE.Color(0xFDFDFD));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+
+//renderer.outputEncoding = THREE.sRGBEncoding;
+
+// WebXR
+//document.body.appendChild(XRButton.createButton(renderer, { spaceType: "local-floor" }));
+document.body.appendChild(XRButton.createButton(renderer, { spaceType: "local" }));
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 100);
+
+camera.layers.enable(1); // render left view when no stereo available
+
+const offy = isVisionPro() ? 1 : 0;
+
+const grp = new THREE.Group();
+
+export const createSpatial2DShader = (fragmentShader) => {
+  const photo = new THREE.Group();
+  const scale = 0.6; //2.5;
+  const textureSize = 512; // 1024 too heavy
+
+  // バーテックスシェーダー
+  const vertexShader = `precision mediump float;
+    attribute vec3 position;
+    uniform mat4 modelViewMatrix;
+    uniform mat4 projectionMatrix;
+    void main() {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        //gl_Position = vec4(position, 1.0);
+    }
+  `;
+  const mats = [];
+  for (let i = 1; i <= 2; i++) {
+    const renderTarget = new THREE.WebGLRenderTarget(textureSize, textureSize, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+    });
+    // テクスチャ生成用のシーンとカメラ
+    const textureScene = new THREE.Scene();
+    const textureCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    textureCamera.position.z = 1;
+
+    const textureMaterial = new THREE.RawShaderMaterial({
+        vertexShader: vertexShader,
+        fragmentShader: fragmentShader,
+        //glslVersion: THREE.GLSL3,
+        uniforms: {
+          r: { value: new THREE.Vector2(textureSize, textureSize) },
+          t: { value: 0.0 },
+          rotate_zx: { value: 0.08 * (i == 1 ? 1 : -1)},
+        },
+    });
+    const planeGeometry = new THREE.PlaneGeometry(2, 2);
+    const planeMesh = new THREE.Mesh(planeGeometry, textureMaterial);
+    textureScene.add(planeMesh);
+    mats.push({ textureMaterial, renderTarget, textureScene, textureCamera });
+
+    const material = new THREE.MeshBasicMaterial({ map: renderTarget.texture, transparent: true });
+    //const geometry = new THREE.PlaneGeometry(scale, scale); // plane
+    const geometry = new THREE.CircleGeometry(scale / 2.0, 64); // circle
+    const plane = new THREE.Mesh(geometry, material);
+
+    // planeの配置
+    plane.layers.set(i); // display in left/right eye only
+    plane.position.x = 0;
+    plane.position.y = 0;
+    plane.position.z = -1;
+    photo.add(plane);
+  }
+  photo.tick = () => {
+    const currentRenderTarget = renderer.getRenderTarget();
+    const currentXrEnabled = renderer.xr.enabled;
+    const currentShadowAutoUpdate = renderer.shadowMap.autoUpdate;
+    renderer.xr.enabled = false;
+    renderer.shadowMap.autoUpdate = false;
+    mats.forEach(obj => {
+      obj.textureMaterial.uniforms.t.value += 0.01;
+      renderer.setRenderTarget(obj.renderTarget);
+      renderer.clear();
+      renderer.render(obj.textureScene, obj.textureCamera);
+      renderer.setRenderTarget(null);
+    });
+    renderer.xr.enabled = currentXrEnabled;
+    renderer.shadowMap.autoUpdate = currentShadowAutoUpdate;
+    renderer.setRenderTarget(currentRenderTarget);
+  };
+  return photo;
+};
+
+const fragmentShader = `#ifdef GL_ES
+precision highp float;
+#endif
+
+uniform vec2 r;
+uniform float t;
+uniform float rotate_zx;
+
+// from https://github.com/doxas/twigl/blob/master/src/shader_snippet/noise.glsl
+vec3 hsv(float h, float s, float v){
+    vec4 t = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(vec3(h) + t.xyz) * 6.0 - vec3(t.w));
+    return v * mix(vec3(t.x), clamp(p - vec3(t.x), 0.0, 1.0), s);
+}
+mat2 rotate2D(float r){
+    return mat2(cos(r), sin(r), -sin(r), cos(r));
+}
+
+void main(void) {
+    float g = 0.;
+    float t1 = t; // 12.5;
+    for (int i = 0; i < 60; i++) {
+        vec3 p = vec3((gl_FragCoord.xy - .5 * r) / r.y * 1.5 * (cos(t1 * .5) * .5 + 1.5), g - .6);
+        p.zx *= rotate2D(rotate_zx);
+        p.zy *= rotate2D(t1 * .5);
+        float s = 1.;
+        float e = 0.;
+        for (int j = 0; j < 9; j++) {
+            s *= e = max(1.005, 8. / dot(p, p));
+            p = vec3(3, 5, 1) - abs(abs(p) * e - vec3(4, 2, 2));
+        }
+        g += mod(length(p.zx), p.y) / s;
+        s = log(s) / g;
+        gl_FragColor.rgb += hsv(.6, e * .4, s / 1.5e3);
+    }
+    gl_FragColor.a = (gl_FragColor.r + gl_FragColor.g + gl_FragColor.b) / 3.0;
+    //gl_FragColor = vec4(1.0, .0, .0, 1.0);
+}
+`;
+
+
+const photo = createSpatial2DShader(fragmentShader);
+photo.position.z = .5;
+photo.position.y = offy;
+scene.add(photo);
+
+/*// スポッドライト(色, 光の強さ, 距離, 照射角, ボケ具合, 減衰率)
+const spotLight = new THREE.SpotLight(0xffffff);
+spotLight.position.set(1, 1, 4.5);
+spotLight.castShadow = true;
+scene.add(spotLight);
+*/
+
+container.appendChild(renderer.domElement);
+
+const orbitControls = new OrbitControls(camera, renderer.domElement);
+orbitControls.target = new THREE.Vector3(0, 0, -1.8);
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  //orbitControls.update();
+  photo.tick();
+  renderer.render(scene, camera);
+});
+
+</script>
+</body>
+
+</html>
